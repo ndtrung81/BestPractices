@@ -206,9 +206,9 @@ def generate_features(df, elem_prop='oliynyk',
                    'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk', 'Cf', 'Es', 'Fm', 'Md',
                    'No', 'Lr', 'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds', 'Rg',
                    'Cn', 'Nh', 'Fl', 'Mc', 'Lv', 'Ts', 'Og']
-
-    elem_props = pd.read_csv(dirpath
-                             + '/cbfv/element_properties/'
+    module_path = os.path.dirname(__file__)
+    elem_props = pd.read_csv(module_path
+                             + '/../cbfv/element_properties/'
                              + elem_prop
                              + '.csv')
     elem_props.index = elem_props['element'].values
