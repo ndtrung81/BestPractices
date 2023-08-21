@@ -243,3 +243,251 @@ class CBFVDataset(Dataset):
 
         return (X, y)
 
+train_data = (X_train, y_train)
+val_data = (X_val, y_val)
+test_data = (X_test, y_test)
+
+# Instantiate the DataLoader
+batch_size = 128
+data_loaders = CBFVDataLoader(train_data, val_data, test_data, batch_size=batch_size)
+train_loader, val_loader, test_loader = data_loaders.get_data_loaders()
+
+# Get input dimension size from the dataset
+example_data = train_loader.dataset.data[0]
+input_dims = example_data.shape[-1]
+
+# Instantiate the model
+model = DenseNet(input_dims, hidden_dims=[16], dropout=0.0)
+print(model)
+
+# Initialize the loss criterion
+criterion = nn.L1Loss()
+print('Loss criterion: ')
+print(criterion)
+
+# Initialize the optimzer
+optim_lr = 1e-2
+optimizer = optim.Adam(model.parameters(), lr=optim_lr)
+print('\nOptimizer: ')
+print(optimizer)
+
+# Move the model and criterion to the compute device
+model = model.to(compute_device)
+criterion = criterion.to(compute_device)
+
+class Scaler():
+    def __init__(self, data):
+        self.data = torch.as_tensor(data)
+        self.mean = torch.mean(self.data)
+        self.std = torch.std(self.data)
+
+    def scale(self, data):
+        data = torch.as_tensor(data)
+        data_scaled = (data - self.mean) / self.std
+        return data_scaled
+
+    def unscale(self, data_scaled):
+        data_scaled = torch.as_tensor(data_scaled)
+        data = data_scaled * self.std + self.mean
+        return data
+
+    def state_dict(self):
+        return {'mean': self.mean,
+                'std': self.std}
+
+    def load_state_dict(self, state_dict):
+        self.mean = state_dict['mean']
+        self.std = state_dict['std']
+
+
+class MeanLogNormScaler():
+    def __init__(self, data):
+        self.data = torch.as_tensor(data)
+        self.logdata = torch.log(self.data)
+        self.mean = torch.mean(self.logdata)
+        self.std = torch.std(self.logdata)
+
+    def scale(self, data):
+        data = torch.as_tensor(data)
+        data_scaled = (torch.log(data) - self.mean) / self.std
+        return data_scaled
+
+    def unscale(self, data_scaled):
+        data_scaled = torch.as_tensor(data_scaled, device=compute_device) * self.std + self.mean
+        data = torch.exp(data_scaled)
+        return data
+
+    def state_dict(self):
+        return {'mean': self.mean,
+                'std': self.std}
+
+    def load_state_dict(self, state_dict):
+        self.mean = state_dict['mean']
+        self.std = state_dict['std']
+
+def predict(model, data_loader):
+    target_list = []
+    pred_list = []
+
+    model.eval()
+    with torch.no_grad():
+        for i, data_output in enumerate(data_loader):
+            X, y_act = data_output
+            X = X.to(compute_device,
+                     dtype=data_type,
+                     non_blocking=True)
+            y_act = y_act.cpu().flatten().tolist()
+            y_pred = model.forward(X).cpu().flatten().tolist()
+
+            # Unscale target values
+            y_pred = target_scaler.unscale(y_pred).tolist()
+
+            targets = y_act
+            predictions = y_pred
+            target_list.extend(targets)
+            pred_list.extend(predictions)
+    model.train()
+
+    return target_list, pred_list
+
+
+def evaluate(target, pred):
+    r2 = r2_score(target, pred)
+    mae = mean_absolute_error(target, pred)
+    rmse = mean_squared_error(target, pred, squared=False)
+    output = (r2, mae, rmse)
+    return output
+
+
+def print_scores(scores, label=''):
+    r2, mae, rmse = scores
+    print(f'{label} r2: {r2:0.4f}')
+    print(f'{label} mae: {mae:0.4f}')
+    print(f'{label} rmse: {rmse:0.4f}')
+    return scores
+
+
+def plot_pred_act(act, pred, model, reg_line=True, label=''):
+    xy_max = np.max([np.max(act), np.max(pred)])
+
+    plot = plt.figure(figsize=(6,6))
+    plt.plot(act, pred, 'o', ms=9, mec='k', mfc='silver', alpha=0.4)
+    plt.plot([0, xy_max], [0, xy_max], 'k--', label='ideal')
+    if reg_line:
+        polyfit = np.polyfit(act, pred, deg=1)
+        reg_ys = np.poly1d(polyfit)(np.unique(act))
+        plt.plot(np.unique(act), reg_ys, alpha=0.8, label='linear fit')
+    plt.axis('scaled')
+    plt.xlabel(f'Actual {label}')
+    plt.ylabel(f'Predicted {label}')
+    plt.title(f'{type(model).__name__}, r2: {r2_score(act, pred):0.4f}')
+    plt.legend(loc='upper left')
+    
+    return plot
+
+y_train = [data[1].numpy().tolist() for data in train_loader]
+y_train = [item for sublist in y_train for item in sublist]
+
+y_train = train_loader.dataset.y
+
+target_scaler = MeanLogNormScaler(y_train)
+
+data_type = torch.float
+epochs = 500
+
+print_every = 20
+plot_every = 50
+
+for epoch in range(epochs):
+    if epoch % print_every == 0 or epoch == epochs - 1:
+        print(f'epoch: {epoch}')
+    if epoch % plot_every == 0:        
+        target_train, pred_train = predict(model, train_loader)
+        train_scores = evaluate(target_train, pred_train)
+        print_scores(train_scores, label='train')
+        
+        target_val, pred_val = predict(model, val_loader)
+        val_scores = evaluate(target_val, pred_val)
+        print_scores(val_scores, label='val')
+        plot_pred_act(target_val, pred_val, model, label='$\mathrm{C}_\mathrm{p}$ (J / mol K)')
+        plt.show()
+        
+    for i, data_output in enumerate(train_loader):
+        X, y = data_output
+        y = target_scaler.scale(y)
+        
+        X = X.to(compute_device,
+                 dtype=data_type,
+                 non_blocking=True)
+        y = y.to(compute_device,
+                 dtype=data_type,
+                 non_blocking=True)
+        
+        optimizer.zero_grad()
+        output = model.forward(X).flatten()
+        loss = criterion(output.view(-1), y.view(-1))
+        loss.backward()
+        optimizer.step()
+
+# Now, with our trained neural network, we can evaluate the performance of the model (at the end of the training phase) on the validation dataset.
+target_val, pred_val = predict(model, val_loader)
+scores = evaluate(target_val, pred_val)
+
+print_scores(scores, label='val')
+
+plot = plot_pred_act(target_val, pred_val, model, label='$\mathrm{C}_\mathrm{p}$ (J / mol K)')
+
+# evaluate the performance on the test dataset. Remember: you should only do this once!
+target_test, pred_test = predict(model, test_loader)
+scores = evaluate(target_test, pred_test)
+
+print_scores(scores, label='test')
+
+plot = plot_pred_act(target_test, pred_test, model, label='$\mathrm{C}_\mathrm{p}$ (J / mol K)')
+
+# Saving the model + target scaler
+save_dict = {'weights': model.state_dict(),
+             'scaler_state': target_scaler.state_dict()}
+print(save_dict)
+
+pth_path = ('model_checkpoint.pth') # .pth is commonly used as the file extension
+torch.save(save_dict, pth_path)
+
+# Of course, if you provide the facilities to save a model, you should also provide facilities to load them and to recreate your model back.
+
+# First, clear the variables for model and target_scaler.
+# We want to start with a clean slate.
+model = None
+target_scaler = None
+del model
+del target_scaler
+
+# Instantiate the model.
+# The model will be randomly initialized, but we will overwrite
+# all weights and biases when we load the checkpoint.
+model = DenseNet(input_dims, hidden_dims=[16], dropout=0.0)
+model = model.to(compute_device)
+print("Initiate the model..")
+print(model)
+
+# Instantiate the target_scaler.
+# We initialize this target_scaler with a vector of zeros,
+# but we will overwrite its internal parameters
+# when we load the checkpoint.
+target_scaler = MeanLogNormScaler(torch.zeros(42))
+
+# Load the checkpoint and map it to the compute device
+pth_path = ('model_checkpoint.pth')
+checkpoint = torch.load(pth_path, map_location=compute_device)
+
+# Load the state dictionaries back into the model and target_scaler
+model.load_state_dict(checkpoint['weights'])
+target_scaler.load_state_dict(checkpoint['scaler_state'])
+
+# Checking the loaded model
+target_test, pred_test = predict(model, test_loader)
+scores = evaluate(target_test, pred_test)
+
+print_scores(scores, label='test')
+
+plot = plot_pred_act(target_test, pred_test, model, label='$\mathrm{C}_\mathrm{p}$ (J / mol K)')
